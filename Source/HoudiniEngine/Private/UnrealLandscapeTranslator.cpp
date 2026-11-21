@@ -1,4 +1,4 @@
-﻿/*
+/*
 * Copyright (c) <2021> Side Effects Software Inc.
 * All rights reserved.
 *
@@ -2642,5 +2642,4 @@ bool FUnrealLandscapeTranslator::SendAllEditLayerTargetLayersToHoudini(
 
 	return true;
 }
-
 

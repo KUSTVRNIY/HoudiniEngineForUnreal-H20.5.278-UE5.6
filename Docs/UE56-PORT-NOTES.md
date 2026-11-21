@@ -3,10 +3,13 @@
 This document records **what** changed to make the upstream plugin compile and run on Unreal Engine
 5.6, **why** each change was needed, and **how** to re-apply the same work to a newer version.
 
-- Upstream base: SideFX *Houdini Engine for Unreal* **v2.2.0**, built for **Houdini 20.5.278**
-  (UE 5.5-era sources).
-- Port: **13 files, +481 / −37 lines**. Full patch: [`UE56-PORT.diff`](UE56-PORT.diff).
-- Target: **Unreal Engine 5.6** (developed and verified on **5.6.1**), Win64.
+- Base: SideFX *Houdini Engine for Unreal* v2 sources distributed for **Houdini 20.5.278**
+  (`HoudiniVersion = "20.5.278"`, HAPI headers 20.5.278 / HAPI 7.0). This is **not** a single public
+  upstream tag: the GitHub tag `v2.2.0` targets Houdini 20.5.292, and this base predates the UE 5.5
+  landscape-edit-layer API (the port adds the 5.5/5.6 branches).
+- Port: **13 source files, +479 / −36 lines** (`Source/` only). Patch: [`UE56-PORT.diff`](UE56-PORT.diff).
+  Descriptor edits are *not* part of the patch — see section 11.
+- Target: **Unreal Engine 5.6**, built and used on **5.6.1**, Win64.
 
 The port keeps `ENGINE_MAJOR_VERSION` / `ENGINE_MINOR_VERSION` guards around every API change, so the
 5.4 and 5.5 code paths are preserved. That makes the patch a usable reference if you have to target
@@ -20,17 +23,20 @@ several engine versions from one tree.
 |---|---|---|
 | `Source/HoudiniEngine/Private/HoudiniEngineAttributes.cpp` | +20 | HAPI heightfield data accessors |
 | `Source/HoudiniEngine/Private/HoudiniEngineAttributes.h` | +3 | declarations for the above |
-| `Source/HoudiniEngine/Private/HoudiniEngineUtils.h` | +10 | `TSet<TObjectPtr<T>>` → `TSet<T*>` helper |
+| `Source/HoudiniEngine/Private/HoudiniEngineUtils.h` | +10 | `TSet<TObjectPtr<T>>` → `TSet<T*>` helper (declared only) |
 | `Source/HoudiniEngine/Private/HoudiniInstanceTranslator.cpp` | +77 | recover zero scale / identity rotation from attributes |
 | `Source/HoudiniEngine/Private/HoudiniLandscapeSplineTranslator.cpp` | +1/−1 | map value type `TObjectPtr` → raw pointer |
 | `Source/HoudiniEngine/Private/UnrealDataTableTranslator.cpp` | +210 | StaticMesh socket export for DataTable inputs |
-| `Source/HoudiniEngine/Private/UnrealLandscapeTranslator.cpp` | +75/−?  | landscape edit-layer API + mask commit + logic fixes |
+| `Source/HoudiniEngine/Private/UnrealLandscapeTranslator.cpp` | +58/−14 | landscape edit-layer API + mask commit + logic fixes |
 | `Source/HoudiniEngine/Private/UnrealLevelInstanceTranslator.cpp` | −1 | unused local removed |
 | `Source/HoudiniEngine/Private/UnrealSkeletalMeshTranslator.cpp` | +2 | physics includes (IWYU) |
-| `Source/HoudiniEngineEditor/Private/HoudiniBakeLandscape.cpp` | +66 | landscape bake API migration + output recording |
-| `Source/HoudiniEngineEditor/Private/HoudiniToolsEditor.cpp` | +8/−?  | weak texture cache access |
-| `Source/HoudiniEngineEditor/Private/HoudiniToolsEditor.h` | +5/−1 | `TMap<FString, TWeakObjectPtr<UTexture2D>>` |
-| `Source/HoudiniEngineRuntime/Private/HoudiniEngineRuntime.cpp` | +38/−?  | safe component unregistration (shutdown) |
+| `Source/HoudiniEngineEditor/Private/HoudiniBakeLandscape.cpp` | +58/−8 | landscape bake API migration + output recording |
+| `Source/HoudiniEngineEditor/Private/HoudiniToolsEditor.cpp` | +5/−3 | weak texture cache access |
+| `Source/HoudiniEngineEditor/Private/HoudiniToolsEditor.h` | +4/−1 | `TMap<FString, TWeakObjectPtr<UTexture2D>>` |
+| `Source/HoudiniEngineRuntime/Private/HoudiniEngineRuntime.cpp` | +31/−8 | safe component unregistration (shutdown) |
+
+Totals: **+479 / −36** over 13 files (`git apply --numstat` on `UE56-PORT.diff`). Lines starting with
+`+`/`−` that are pure re-indentation are counted too, so a few hunks contain no semantic change.
 
 ---
 
@@ -94,13 +100,14 @@ else
 
 ### 2.5 Other landscape fixes
 
-- `CreateInputNodeForLandscapeObject`: the selection-only branch and the full-landscape branch were
-  re-balanced (braces/indentation) and the selected-component set is converted to the
-  `TSet<ULandscapeComponent*>` the callee expects.
-- `CreateHeightfieldFromLandscape`: a missing `return false;` guard was fixed (it silently continued
-  after a failed `SendTargetLayersToHoudini`).
-- Removed a stray trailing blank line and the accidental BOM/re-indentation noise so the file stays
-  diff-clean against upstream.
+- `CreateInputNodeForLandscapeObject`: the full-landscape and selection-only calls were put into explicit
+  `{ }` branches (cosmetic) and the selected-component collection is passed through a
+  `TSet<ULandscapeComponent*>` conversion the callee expects.
+- `CreateHeightfieldFromLandscape`: the `return false;` after a failed `SendTargetLayersToHoudini` is only
+  **re-indented** in the same hunk — the guard already existed upstream, this is not a behaviour fix.
+- No whitespace noise: the port does not add or remove BOMs or trailing blank lines in this file. (The
+  original working copy had a UTF-8 BOM and an extra EOF blank line; both were removed before the patch
+  in `UE56-PORT.diff` was generated, so they do not appear in it.)
 
 ---
 
@@ -130,10 +137,12 @@ for (int32 nIdx = 0; nIdx < RegisteredHoudiniComponents.Num(); nIdx++)
 }
 ```
 
-`IsValid(true, true)` (even-if-garbage + even-if-unreachable) is deliberate: during shutdown objects are
-unreachable but still alive enough to compare. The method also bails out early when the registry is
-empty, and `UnRegisterHoudiniComponent(const int32&)` now validates the index and guards
-`GetAssetId() >= 0` before queueing node deletion.
+`IsValid(true, true)` passes `bEvenIfPendingKill = true` (objects already pending destruction still count)
+and `bThreadsafeTest = true` — the 5.6 signature is `IsValid(bool bEvenIfPendingKill, bool bThreadsafeTest)`;
+`GetEvenIfUnreachable()` then returns the object even after it has been marked unreachable. Both arguments
+are deliberate: during shutdown objects are unreachable / pending-kill but still alive enough to compare.
+The method also bails out early when the registry is empty, and `UnRegisterHoudiniComponent(const int32&)`
+now validates the index and guards `GetAssetId() >= 0` before queueing node deletion.
 
 ### 3.2 Tool icon cache
 
@@ -150,13 +159,16 @@ with `.Get()` on reads and `IsValid(CachedTexture) && CachedTexture->IsValidLowL
 
 ### 3.3 TObjectPtr set conversion helper
 
-`HoudiniEngineUtils.h` gained a tiny template so call sites can keep passing `TSet<T*>` where 5.6 hands
-over `TSet<TObjectPtr<T>>`:
+`HoudiniEngineUtils.h` gained a tiny template for `TSet<TObjectPtr<T>>` → `TSet<T*>` conversion:
 
 ```cpp
 template <typename T>
 static TSet<T*> RemoveObjectPtr(const TSet<TObjectPtr<T>>& In);
 ```
+
+The helper is declared and defined in the header but has **no call sites** in this tree yet — it is
+available for code that has to hand a `TSet<T*>` to a pre-5.6 API. Keep it or drop it; nothing depends
+on it.
 
 ---
 
@@ -246,16 +258,17 @@ This is an MVP by design: one mesh column, editor-side sockets only, re-exported
   `PhysicsAsset.h`, so `USkeletalBodySetup`/`FKAggregateGeom` became incomplete types.
 - `UnrealLevelInstanceTranslator.cpp`: removed an unused `FVector3f Position;` — shadowing/`-Werror`
   clean builds reject it.
-- `HoudiniEngineAttributes.cpp`: `#include "UObject/UObjectIterator.h"`, `Engine/StaticMesh.h`,
-  `Engine/StaticMeshSocket.h` for the socket export.
+- `UnrealDataTableTranslator.cpp`: explicit `#include "UObject/UObjectIterator.h"`, `"Engine/StaticMesh.h"`
+  and `"Engine/StaticMeshSocket.h"` for the socket export. `HoudiniEngineAttributes.cpp` gained **no** new
+  includes — its change is the two heightfield accessor methods only.
 
 ---
 
 ## 9. How to re-apply to a future engine version
 
 1. Diff upstream against the ported tree to see the shape of the work:
-   the patch in `UE56-PORT.diff` uses `a/upstream/…` (pristine v2.2.0 sources) and `b/ported/…`
-   (this repository).
+   the patch in `UE56-PORT.diff` uses `a/upstream/…` (the pristine 20.5.278 base sources) and
+   `b/ported/…` (this repository's `Source/` tree).
 2. Start from the **new** upstream sources, not from this tree, and re-apply section by section with the
    `ENGINE_MINOR_VERSION` guards updated for the new target.
 3. Expect the landscape edit-layer block (section 2) to need the most attention again — that API has
@@ -268,11 +281,31 @@ This is an MVP by design: one mesh column, editor-side sockets only, re-exported
 
 ## 10. Verification status of this port
 
-- Compiles cleanly for `Win64 / Development Editor` against UE 5.6.1 with Houdini 20.5.278 (the
-  `Binaries/` output of that build was used to validate the port; build artifacts are not committed).
-- Editor launches with the plugin enabled, the *Houdini Engine* menu appears, sessions start against
-  Houdini 20.5.278, HDA cook/parameter/bake workflows run.
+These notes describe a port that was compiled and used in a real project; **no CI pipeline, build log or
+test log is stored in this repository**, so treat the statements below as author-side observations:
+
+- The source tree compiles for `Win64 / Development Editor` with UE 5.6.1 and Houdini 20.5.278 (the
+  build output was used in the project the port was made for; build artifacts are not committed).
+- In that project the plugin loads, the *Houdini Engine* menu appears, sessions start against Houdini
+  20.5.278, and HDA cook / parameter-change / bake workflows run.
 - The landscape edit-layer paths compile against the 5.6 API and the mask/bake fixes are in place; they
   were exercised less than the mesh/instance workflows, so treat them as the most likely area for a
   remaining porting defect.
 - Nothing in the port was validated on UE 5.5, 5.7, Linux/macOS, or in a packaged/Shipping build.
+
+---
+
+## 11. Plugin descriptor changes (not part of the patch)
+
+`HoudiniEngine.uplugin` lives outside `Source/`, so it is **not** included in `UE56-PORT.diff`. Its
+changes are:
+
+| Field | This repository | Why |
+|---|---|---|
+| `Version` | `20050278` | unchanged — Houdini build number, matches the HAPI headers |
+| `VersionName` | `2.2.0 - H20.5.278 (UE5.6 port)` | marks the port explicitly in *Edit → Plugins* (SideFX's naming scheme for this build is `2.0 - H20.5.<build>`) |
+| `Installed` | `false` | source distribution: Unreal must compile the modules in the target project; upstream ships it as `true` together with prebuilt binaries |
+| `CreatedBy`, URLs, modules | unchanged | SideFX attribution and the three-module layout are untouched |
+
+If you re-base this port on a newer upstream drop, re-apply these three fields by hand after applying
+`UE56-PORT.diff`.

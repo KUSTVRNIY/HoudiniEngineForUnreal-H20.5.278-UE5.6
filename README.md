@@ -11,12 +11,12 @@
 
 > ### ⚠️ READ THIS FIRST — THIS PLUGIN IS VERSION-LOCKED
 >
-> **It is built for exactly two versions and will not work with anything else:**
+> **It is built and tested for exactly these two versions; only this combination is supported:**
 >
 > | Component | Required version |
 > |---|---|
 > | **Houdini / Houdini Engine** | **20.5.278** (HAPI 7.0) |
-> | **Unreal Engine** | **5.6** — built and tested on **5.6.1** |
+> | **Unreal Engine** | **5.6** — the port was built and used on **5.6.1** |
 > | **Platform** | **Windows 64-bit** |
 >
 > The Houdini version is **not a recommendation**, it is compiled into the plugin:
@@ -26,10 +26,10 @@
 > If you have a different Houdini build or a different Unreal version, use the official SideFX build
 > for your versions instead (see [section 15](#15-updating-the-plugin-to-other-versions)).
 
-This repository is a **working UE 5.6 port** of the SideFX *Houdini Engine for Unreal v2* plugin
-(upstream `v2.2.0`, Houdini 20.5.278). It is the full plugin folder — drop it into your project's
-`Plugins/` directory; the editor builds the three modules once on first launch (Visual Studio 2022
-required for that one step, see [section 8](#8-building-from-source)).
+This repository is a **working UE 5.6 port** of the SideFX *Houdini Engine for Unreal v2* plugin, based
+on the v2 sources distributed for **Houdini 20.5.278**. It is the full plugin folder — drop it into your
+project's `Plugins/` directory; the editor builds the three modules once on first launch (Visual Studio
+2022 required for that one step, see [section 8](#8-building-from-source)).
 
 It is **unofficial** and **not affiliated with or endorsed by Side Effects Software Inc.**
 The plugin code is SideFX's; this fork only adds the UE 5.6 compatibility work and a few fixes
@@ -78,13 +78,13 @@ In practice:
   supported, as in upstream.
 
 This build makes all of that work on **UE 5.6**, where a number of landscape/edit-layer and
-UObject-lifetime APIs changed and upstream's `v2.2.0` sources no longer compile.
+UObject-lifetime APIs changed and the upstream sources this fork is based on no longer compile.
 
 ---
 
 ## 2. Why the strict version lock
 
-Three separate locks force Houdini 20.5.278 and UE 5.6 — this is why the versions in the table above
+Four separate locks force Houdini 20.5.278 and UE 5.6 — this is why the versions in the table above
 are non-negotiable:
 
 1. **Houdini build lock — build time.** `Source/HoudiniEngine/HoudiniEngine.Build.cs` contains
@@ -105,12 +105,14 @@ are non-negotiable:
    with the defined-vs-running numbers, and aborts; an API-only mismatch is a warning. This compares the
    *HAPI engine* version (7.0 / api 0), not the Houdini build number.
 4. **Engine lock — source level.** The port targets UE 5.6 APIs (landscape edit layers, `TObjectPtr`
-   handling, IWYU includes). On 5.5 or 5.7 the source will not compile without further edits.
+   handling, IWYU includes). On 5.7 further source edits are required; the preserved 5.5 branch has not
+   been compiled or tested.
 
 Mixing versions is the most common failure mode. Other Houdini builds (e.g. 20.5.370) can still pass
 the runtime HAPI check because they share HAPI 7.0 / api 0, but this plugin is compiled against the
-**20.5.278** headers and is only tested on 20.5.278 — treat anything else as unsupported. UE 5.5 or 5.7
-source does not compile without further edits. Keep both versions exactly as listed.
+**20.5.278** headers and has only been validated on 20.5.278 — treat anything else as unsupported. Only
+UE 5.6 is validated for this source; 5.5 and 5.7 would need further work. Keep both versions exactly as
+listed.
 
 ---
 
@@ -119,7 +121,7 @@ source does not compile without further edits. Keep both versions exactly as lis
 | Item | Requirement |
 |---|---|
 | OS | Windows 10 / 11, 64-bit |
-| Unreal Engine | **5.6** (built and tested with **5.6.1**) |
+| Unreal Engine | **5.6** (built and used on **5.6.1**) |
 | Houdini | **Houdini 20.5.278** *or* **Houdini Engine 20.5.278** installed locally |
 | Houdini licence | a valid Houdini licence that allows Houdini Engine sessions (Indie / Core / FX / Engine). Houdini Indie sessions are non-commercial only |
 | Build tools | **Visual Studio 2022** with the *Game development with C++* workload and a Windows SDK compatible with UE 5.6 — this repository ships **source only**, so the modules are compiled once on first launch |
@@ -200,7 +202,8 @@ What to expect:
 1. Install **Visual Studio 2022** with the *Game development with C++* workload and a Windows SDK
    compatible with UE 5.6 (the *Desktop development with C++* workload plus the SDK component is enough).
 2. Open your project. Unreal detects the enabled plugin without modules and asks to build them →
-   **Yes**. The first build of 219k lines of plugin code takes a few minutes on a normal desktop.
+   **Yes**. The first build of ~204k lines of plugin C++ (excluding the bundled HAPI headers) takes a few
+   minutes on a normal desktop.
 3. Subsequent launches reuse the compiled modules in `Plugins/HoudiniEngine/Binaries/`. You only build
    again after changing the plugin source, upgrading the engine, or after a clean.
 
@@ -240,7 +243,8 @@ the HAPI library `libHAPIL.dll`, which on a normal Windows install is the **`bin
 
 > If the folder does not contain `libHAPIL.dll`, the plugin shows a message box
 > *"libHAPIL.dll was not found in &lt;path&gt;" / "Invalid Custom Location Specified, resetting."* and
-> clears the setting — so a path pointing at the install root is silently rejected.
+> clears the setting — a path pointing at the install root is rejected with that message, not silently
+> accepted.
 > The check and the load are both a plain `&lt;path&gt;/libHAPIL.dll`, no `bin` is appended.
 
 The equivalent `DefaultEngine.ini` entry (project `Config/` folder):
@@ -255,9 +259,9 @@ Notes:
 
 - The same panel lets you pick the **Houdini Executable** used for Session Sync, a **Custom Houdini
   Home Location** (what `$HOME` resolves to inside Houdini), `.env` files, and the OTL/DSO search paths.
-- **Session Type** (Project Settings → Houdini Engine → Session) selects how Houdini Engine is reached:
-  *Named pipe* (default), *TCP socket*, *Shared Memory Buffer*, *In Process* (experimental) or *None*
-  (no session — nothing cooks).
+- **Session Type** (Project Settings → Plugins → Houdini Engine → Session) selects how Houdini Engine is
+  reached: *Named pipe* (default), *TCP socket*, *Shared Memory Buffer*, *In Process* (experimental) or
+  *None* (no session — nothing cooks).
 
 ---
 
@@ -355,9 +359,16 @@ the `Development Editor | Win64` configuration, build. Output DLLs land in
 
 ## 9. What was changed for UE 5.6 (this fork)
 
-Base: SideFX **Houdini Engine for Unreal v2.2.0** for Houdini **20.5.278** (UE 5.5-era sources).
-Port diff: **13 files, +481 / −37 lines**. Full patch: [`Docs/UE56-PORT.diff`](Docs/UE56-PORT.diff),
-per-change rationale: [`Docs/UE56-PORT-NOTES.md`](Docs/UE56-PORT-NOTES.md).
+Base: the SideFX *Houdini Engine for Unreal* v2 sources distributed for **Houdini 20.5.278**
+(`HoudiniVersion = "20.5.278"` in `Build.cs`, HAPI headers generated for 20.5.278, HAPI 7.0 / api 0).
+This base is **not identical to a public upstream tag**: the upstream GitHub tag `v2.2.0` targets Houdini
+20.5.292, and this base predates the UE 5.5 landscape-edit-layer API (the port adds the 5.5/5.6 branches).
+
+Source diff against that base: **13 files, +479 / −36 lines**
+([`Docs/UE56-PORT.diff`](Docs/UE56-PORT.diff)). The patch covers `Source/` only — the plugin-descriptor
+edits (version marker, `Installed: false`) are listed in [`NOTICE.md`](NOTICE.md) and
+[`Docs/UE56-PORT-NOTES.md`](Docs/UE56-PORT-NOTES.md), not in the diff. Per-change rationale:
+[`Docs/UE56-PORT-NOTES.md`](Docs/UE56-PORT-NOTES.md).
 
 | Area | Files | What changed |
 |---|---|---|
@@ -365,16 +376,17 @@ per-change rationale: [`Docs/UE56-PORT-NOTES.md`](Docs/UE56-PORT-NOTES.md).
 | Landscape heightfield mask | `UnrealLandscapeTranslator.cpp` | The mask heightfield is now always created and committed, also when *merged paint layers* export is off — HAPI's volume info does not work correctly without a committed mask. |
 | Landscape bake | `HoudiniBakeLandscape.cpp` | Baked landscape path is written back to the output object; layer lock/visibility/clear calls use the 5.6 edit-layer API; splines reserved layer resolved via `FindEditLayerOfType()`. |
 | Landscape spline output | `HoudiniLandscapeSplineTranslator.cpp` | `TMap` value type fixed (`TObjectPtr<…>` → `…*`) to match the UPROPERTY map type on 5.6. |
-| UObject lifetime / GC | `HoudiniEngineRuntime.cpp`, `HoudiniToolsEditor.h/.cpp`, `HoudiniEngineUtils.h` | Shutdown crashes fixed: manual raw-pointer search instead of `TArray<TWeakObjectPtr>::Find()`, `GetEvenIfUnreachable()`, `IsValid(true, true)`; tool icon cache switched to `TWeakObjectPtr` with `IsValidLowLevelFast()`; helper to convert `TSet<TObjectPtr<T>>`. |
+| UObject lifetime / GC | `HoudiniEngineRuntime.cpp`, `HoudiniToolsEditor.h/.cpp`, `HoudiniEngineUtils.h` | Shutdown crashes fixed: manual raw-pointer search instead of `TArray<TWeakObjectPtr>::Find()` in `UnRegisterHoudiniComponent()`, `GetEvenIfUnreachable()`, `IsValid(true, true)`; tool icon cache switched to `TWeakObjectPtr` with `IsValidLowLevelFast()`; helper for `TSet<TObjectPtr<T>>` conversion (declared; not called anywhere yet). |
 | Instance outputs | `HoudiniInstanceTranslator.cpp` | recovers per-instance **scale** and **rotation** from the Houdini point attributes when HAPI reports zero scale / identity rotation (multi-part attribute instancers). |
 | DataTable inputs | `UnrealDataTableTranslator.cpp` | exports **StaticMesh sockets** as point attributes so HDAs can place props on sockets ("props MVP"). |
 | Heightfield access | `HoudiniEngineAttributes.h/.cpp` | added `GetHeightFieldData()` / `GetHeightFieldDataViaSession()` accessors. |
 | Includes (IWYU) | `UnrealSkeletalMeshTranslator.cpp` | explicit `PhysicsEngine/SkeletalBodySetup.h`, `PhysicsEngine/AggregateGeom.h`. |
 | Cleanup | `UnrealLevelInstanceTranslator.cpp` | removed an unused local that 5.6 compiles more strictly about. |
-| Descriptor | `HoudiniEngine.uplugin` | version marked `20050278`, `VersionName` = `2.2.0 - H20.5.278 (UE5.6 port)`. |
+| Descriptor | `HoudiniEngine.uplugin` | version marked `20050278`, `VersionName` = `2.2.0 - H20.5.278 (UE5.6 port)`, `Installed: false` for source distribution. **Descriptor edit — not part of the source diff.** |
 
-No upstream file was deleted or renamed, so a future upstream drop can be re-merged by applying
-`Docs/UE56-PORT.diff` (or by diffing against the new upstream the same way).
+The diff adds no new files and deletes/renames none, so a future upstream drop can be re-merged by
+applying `Docs/UE56-PORT.diff` to the `Source/` tree; the descriptor fields listed above then have to be
+reapplied by hand.
 
 ---
 
@@ -439,9 +451,10 @@ raw pointer with `GetEvenIfUnreachable()`. Both paths now fail soft instead of a
 
 ### 10.4 Landscape bake output recording
 
-`MoveCookedToBakedLandscapes` now stores the baked landscape path on the output object
-(`BakedOutputObject.Landscape`), so later code (and later bakes) can find the baked landscape actor from
-the output object instead of only through the local bake result.
+`MoveCookedToBakedLandscapes` now writes the baked landscape path into the output object
+(`BakedOutputObject.Landscape`, set where the baked landscape actor is created). This is bookkeeping in
+the baked-output state; today the only reader is the landscape-spline bake path, which uses it to locate
+the baked landscape.
 
 ---
 
@@ -476,8 +489,8 @@ Inherited from upstream v2 (all of it is in this build):
 | Cook fails immediately on every asset | Session type misconfigured, or Houdini blocked by firewall | Try *Named pipe* or *Shared memory* session type; check **Show Cook Logs** |
 | Instances invisible / not rotated | HAPI reported zero scale / identity rotation; pre-fix builds do not recover it | Build from this source (see 10.1) and look for the `recovered … instance scales/rotations` warning in the log |
 | Editor crashes on exit with `Assertion failed: Index >= 0` | Shutdown bug present upstream; fixed in this fork | Build the modules from this source (see 10.3) — an older copy of the DLLs still has the bug |
-| Landscape bake produces nothing / wrong layer | Landscape edit-layer API mismatch | Use the 5.6 build from this repo; verify **Bake → to edit layers** in the component details; check for the layer name in the output log |
-| Static meshes from an HDA are all double-sided / wrong material | Plugin defaults | **Project Settings → Houdini Engine → Mesh generation** (`Double Sided Geometry`, `Simple Collision Physical Material`, lightmap settings) |
+| Landscape bake produces nothing / wrong layer | Wrong landscape bake type, or the target edit layer does not exist | In the component's *Outputs* details set the landscape bake-type dropdown (**To Current Level** / **To Image** / **To New World**) and the **Edit Layer** name field; the layer must exist in the target landscape |
+| Static meshes from an HDA are all double-sided / wrong material | Plugin defaults | **Project Settings → Plugins → Houdini Engine → Generated Static Mesh Settings** (`Double Sided Geometry`, `Simple Collision Physical Material`, lightmap options) |
 | `Intermediate/` explodes to many GB | Normal cook/build cache | Never commit it; delete to reclaim space, it is regenerated |
 
 When reporting a problem, include: exact Houdini build, exact UE build (e.g. `5.6.1`), whether the
@@ -496,9 +509,9 @@ modules were built from this source or you use some prebuilt copy, and the match
   `HoudiniEngine` and `HoudiniEngineEditor` modules are editor modules); cooking in a packaged game was
   not tested.
 - **`.pdb` symbols are not included** — build locally if you want to debug the plugin.
-- **Landscape 5.6 paths** (edit layers export, spline layers, bake to edit layers) are ported and
-  compile/run, but were exercised less than the mesh/instance workflows — treat them as the most likely
-  place to find a porting bug.
+- **Landscape 5.6 paths** (edit layers export, spline layers, bake to edit layers) are ported and build,
+  but were exercised less than the mesh/instance workflows — treat them as the most likely place to find
+  a porting bug.
 - **DataTable socket export is an MVP** (one mesh column, editor-side sockets only, see 10.2).
 - **Instance transform recovery** fires only for zero-scale / identity-rotation entries; it deliberately
   does not second-guess transforms that HAPI reported.
@@ -530,15 +543,15 @@ HoudiniEngine/                       <- drop this folder into YourProject/Plugin
     HoudiniEngineEditor/             editor module (menus, details, bake UI)
     HoudiniEngineRuntime/            runtime module (assets, components, settings)
   Docs/
-    UE56-PORT.diff                   the complete UE 5.6 port patch (upstream -> this fork)
+    UE56-PORT.diff                   complete Source/ port patch against the 20.5.278 base
+                                     (descriptor edits are not included)
     UE56-PORT-NOTES.md               per-file porting notes and re-apply instructions
   Binaries/  Intermediate/           NOT in the repo — created by the first build
 ```
 
 **Not in the repository on purpose:** `Binaries/` and `Intermediate/` (build output — compiled modules
 also embed the builder's local paths and engine build id, so they are built per machine and per engine
-build), `.pdb` symbols, and a duplicate nested copy of the upstream source tree that shipped inside the
-original plugin archive.
+build) and `.pdb` symbols.
 
 ---
 
@@ -558,7 +571,8 @@ If you need Houdini 21 / UE 5.7 later, this is the checklist (the same work that
 5. **Smoke test** — import a simple HDA, cook, change a parameter, bake; then test landscape export and
    DataTable inputs if you use them.
 
-Do not mix a new HAPI with old plugin binaries: HAPI's runtime version check will reject the session.
+Do not mix a new HAPI with modules built against the old headers: the plugin's runtime HAPI check
+aborts on a major/minor mismatch (an API-only mismatch only warns).
 
 ---
 

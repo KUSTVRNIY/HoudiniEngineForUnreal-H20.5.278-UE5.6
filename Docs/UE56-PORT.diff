@@ -394,15 +394,9 @@ index bf75df6..97856c2 100644
  	if (!FHoudiniEngineUtils::HapiCookNode(InputNodeId, nullptr, true))
  		return false;
 diff --git a/upstream/Source/HoudiniEngine/Private/UnrealLandscapeTranslator.cpp b/ported/Source/HoudiniEngine/Private/UnrealLandscapeTranslator.cpp
-index f60f144..acb132c 100644
+index f60f144..1682a6d 100644
 --- a/upstream/Source/HoudiniEngine/Private/UnrealLandscapeTranslator.cpp
 +++ b/ported/Source/HoudiniEngine/Private/UnrealLandscapeTranslator.cpp
-@@ -1,4 +1,4 @@
--/*
-+﻿/*
- * Copyright (c) <2021> Side Effects Software Inc.
- * All rights reserved.
- *
 @@ -43,6 +43,9 @@
  #include "LandscapeStreamingProxy.h"
  #include "LandscapeDataAccess.h"
@@ -559,11 +553,6 @@ index f60f144..acb132c 100644
  			const FName & TargetLayerName = LandscapeInfo->Layers[TargetLayerIndex].GetLayerName();
  
  			FHoudiniExtents Extents = FHoudiniLandscapeUtils::GetLandscapeExtents(LandscapeProxy);
-@@ -2599,3 +2643,4 @@ bool FUnrealLandscapeTranslator::SendAllEditLayerTargetLayersToHoudini(
- 	return true;
- }
- 
-+
 diff --git a/upstream/Source/HoudiniEngine/Private/UnrealLevelInstanceTranslator.cpp b/ported/Source/HoudiniEngine/Private/UnrealLevelInstanceTranslator.cpp
 index b051bc8..c15512e 100644
 --- a/upstream/Source/HoudiniEngine/Private/UnrealLevelInstanceTranslator.cpp
