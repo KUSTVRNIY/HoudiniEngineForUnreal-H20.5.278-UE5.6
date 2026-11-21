@@ -1,0 +1,18 @@
+# Normalise text files, but never touch binary payloads (Unreal assets, HDAs,
+# prebuilt modules, images). Without this, git's autocrlf can corrupt .uasset /
+# .umap files on checkout on Windows.
+* text=auto eol=lf
+
+*.uasset  binary
+*.umap    binary
+*.uexp    binary
+*.ubulk   binary
+*.hda     binary
+*.otl     binary
+*.dll     binary
+*.pdb     binary
+*.png     binary
+*.jpg     binary
+*.tga     binary
+*.exr     binary
+*.zip     binary

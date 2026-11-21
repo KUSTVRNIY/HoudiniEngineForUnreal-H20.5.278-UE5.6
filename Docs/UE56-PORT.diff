@@ -1,0 +1,871 @@
+﻿diff --git a/upstream/Source/HoudiniEngine/Private/HoudiniEngineAttributes.cpp b/ported/Source/HoudiniEngine/Private/HoudiniEngineAttributes.cpp
+index f00eff9..1169686 100644
+--- a/upstream/Source/HoudiniEngine/Private/HoudiniEngineAttributes.cpp
++++ b/ported/Source/HoudiniEngine/Private/HoudiniEngineAttributes.cpp
+@@ -271,6 +271,26 @@ struct FHoudiniAttributeTask
+ 
+ };
+ 
++bool FHoudiniHapiAccessor::GetHeightFieldDataViaSession(const HAPI_Session* Session, const HAPI_AttributeInfo& AttributeInfo, float* Results, int IndexStart, int IndexCount) const
++{
++	HAPI_Result Result = FHoudiniApi::GetHeightFieldData(Session, NodeId, PartId, Results, IndexStart, IndexCount);
++	return Result == HAPI_Result::HAPI_RESULT_SUCCESS;
++}
++
++bool FHoudiniHapiAccessor::GetHeightFieldData(TArray<float>& Results, int IndexCount)
++{
++	H_SCOPED_FUNCTION_TIMER();
++
++	Results.SetNumUninitialized(IndexCount);
++	const HAPI_Session* Session = FHoudiniEngine::Get().GetSession();
++	if (!GetHeightFieldDataViaSession(Session, HAPI_AttributeInfo(), Results.GetData(), 0, IndexCount))
++	{
++		Results.Empty();
++		return false;
++	}
++	return true;
++}
++
+ template<typename DataType>
+ struct FHoudiniAttributeGetTask : public  FHoudiniAttributeTask
+ {
+diff --git a/upstream/Source/HoudiniEngine/Private/HoudiniEngineAttributes.h b/ported/Source/HoudiniEngine/Private/HoudiniEngineAttributes.h
+index 3a11ad1..0d102c9 100644
+--- a/upstream/Source/HoudiniEngine/Private/HoudiniEngineAttributes.h
++++ b/ported/Source/HoudiniEngine/Private/HoudiniEngineAttributes.h
+@@ -48,6 +48,9 @@ struct FHoudiniHapiAccessor
+ 	// Initialization functions. use these functions to initialize the accessor.
+ 	FHoudiniHapiAccessor(HAPI_NodeId NodeId, HAPI_NodeId PartId, const char* Name);
+ 	FHoudiniHapiAccessor() {}
++
++	bool GetHeightFieldData(TArray<float>& Values, int IndexCount);
++	bool GetHeightFieldDataViaSession(const HAPI_Session* Session, const HAPI_AttributeInfo& AttributeInfo, float* Results, int IndexStart, int IndexCount) const;
+ 	void Init(HAPI_NodeId InNodeId, HAPI_NodeId InPartId, const char * InName);
+ 
+ 	// Get HAPI_AttributeInfo from the accessor. 
+diff --git a/upstream/Source/HoudiniEngine/Private/HoudiniEngineUtils.h b/ported/Source/HoudiniEngine/Private/HoudiniEngineUtils.h
+index 6b97529..9e8635b 100644
+--- a/upstream/Source/HoudiniEngine/Private/HoudiniEngineUtils.h
++++ b/ported/Source/HoudiniEngine/Private/HoudiniEngineUtils.h
+@@ -1266,6 +1266,16 @@ struct HOUDINIENGINE_API FHoudiniEngineUtils
+ 			FHoudiniAttributeResolver& OutResolver,
+ 			bool bInSkipTempFolderResolutionAndUseDefault=false);
+ 
++		template <typename T>
++		static TSet<T*> RemoveObjectPtr(const TSet<TObjectPtr<T>>& In)
++		{
++			TSet<T*> Result;
++			Result.Reserve(In.Num());
++			for(T* Ptr : In)
++				Result.Add(Ptr);
++			return Result;
++		}
++
+ 		// -------------------------------------------------
+ 		// Foliage utilities
+ 		// -------------------------------------------------
+diff --git a/upstream/Source/HoudiniEngine/Private/HoudiniInstanceTranslator.cpp b/ported/Source/HoudiniEngine/Private/HoudiniInstanceTranslator.cpp
+index e38b2aa..28b2f06 100644
+--- a/upstream/Source/HoudiniEngine/Private/HoudiniInstanceTranslator.cpp
++++ b/ported/Source/HoudiniEngine/Private/HoudiniInstanceTranslator.cpp
+@@ -3065,6 +3065,83 @@ FHoudiniInstanceTranslator::HapiGetInstanceTransforms(
+ 		FHoudiniEngineUtils::TranslateHapiTransform(InstanceTransform, OutInstancerUnrealTransforms[InstanceIdx]);
+ 	}
+ 
++	// UE5.6 port fix: when an HDA outputs several attribute-instancer parts (for example
++	// walls plus roof pieces), HAPI can report a zero scale for a part even though its
++	// point 'scale' attribute holds valid values. That makes instances invisible in UE.
++	// Recover the scale directly from the attribute in that case.
++	{
++		FHoudiniHapiAccessor ScaleAccessor(InHGPO.GeoId, InHGPO.PartId, HAPI_UNREAL_ATTRIB_INSTANCE_SCALE);
++		TArray<FVector3f> ScaleValues;
++		if (ScaleAccessor.GetAttributeData(HAPI_ATTROWNER_POINT, ScaleValues) &&
++			ScaleValues.Num() == OutInstancerUnrealTransforms.Num())
++		{
++			int32 RecoveredScaleCount = 0;
++			for (int32 InstanceIdx = 0; InstanceIdx < ScaleValues.Num(); InstanceIdx++)
++			{
++				FTransform& InstanceTransform = OutInstancerUnrealTransforms[InstanceIdx];
++				const FVector InstanceScale = InstanceTransform.GetScale3D();
++				const FVector3f& AttrScale = ScaleValues[InstanceIdx];
++				// Houdini is Y-up: swap Y/Z the same way TranslateHapiTransform does.
++				const FVector AttrScaleUE(AttrScale.X, AttrScale.Z, AttrScale.Y);
++				if (InstanceScale.IsNearlyZero() && !AttrScaleUE.IsNearlyZero())
++				{
++					InstanceTransform.SetScale3D(AttrScaleUE);
++					RecoveredScaleCount++;
++				}
++			}
++
++			if (RecoveredScaleCount > 0)
++			{
++				HOUDINI_LOG_WARNING(TEXT("[HoudiniInstanceTranslator] HapiGetInstanceTransforms: recovered %d zero instance scales from the 'scale' attribute (Geo %d, Part %d)."),
++					RecoveredScaleCount, InHGPO.GeoId, InHGPO.PartId);
++			}
++		}
++	}
++
++	// UE5.6 port fix (rotations): HAPI can also report an identity rotation for such a part,
++	// while the instancer points carry a valid 'orient' quaternion. Recover it as well.
++	{
++		FHoudiniHapiAccessor OrientAccessor(InHGPO.GeoId, InHGPO.PartId, "orient");
++		HAPI_AttributeInfo OrientInfo;
++		FHoudiniApi::AttributeInfo_Init(&OrientInfo);
++		if (OrientAccessor.GetInfo(OrientInfo, HAPI_ATTROWNER_POINT) &&
++			OrientInfo.tupleSize == 4 &&
++			OrientInfo.count == OutInstancerUnrealTransforms.Num())
++		{
++			TArray<float> OrientRaw;
++			OrientRaw.SetNum(OrientInfo.count * 4);
++			if (OrientAccessor.GetAttributeData(OrientInfo, OrientRaw.GetData(), 0, OrientInfo.count))
++			{
++				int32 RecoveredRotationCount = 0;
++				for (int32 InstanceIdx = 0; InstanceIdx < OrientInfo.count; InstanceIdx++)
++				{
++					FTransform& InstanceTransform = OutInstancerUnrealTransforms[InstanceIdx];
++					if (!InstanceTransform.GetRotation().IsIdentity())
++						continue;
++
++					const float qx = OrientRaw[InstanceIdx * 4 + 0];
++					const float qy = OrientRaw[InstanceIdx * 4 + 1];
++					const float qz = OrientRaw[InstanceIdx * 4 + 2];
++					const float qw = OrientRaw[InstanceIdx * 4 + 3];
++
++					// Houdini is Y-up and TranslateHapiTransform inverts W: same mapping here.
++					const FQuat OrientUE((double)qx, (double)qz, (double)qy, (double)-qw);
++					if (OrientUE.SizeSquared() > KINDA_SMALL_NUMBER && !OrientUE.IsIdentity())
++					{
++						InstanceTransform.SetRotation(OrientUE.GetNormalized());
++						RecoveredRotationCount++;
++					}
++				}
++
++				if (RecoveredRotationCount > 0)
++				{
++					HOUDINI_LOG_WARNING(TEXT("[HoudiniInstanceTranslator] HapiGetInstanceTransforms: recovered %d instance rotations from the 'orient' attribute (Geo %d, Part %d)."),
++						RecoveredRotationCount, InHGPO.GeoId, InHGPO.PartId);
++				}
++			}
++		}
++	}
++
+ 	return true;
+ }
+ 
+diff --git a/upstream/Source/HoudiniEngine/Private/HoudiniLandscapeSplineTranslator.cpp b/ported/Source/HoudiniEngine/Private/HoudiniLandscapeSplineTranslator.cpp
+index 7c639a4..2bdce20 100644
+--- a/upstream/Source/HoudiniEngine/Private/HoudiniLandscapeSplineTranslator.cpp
++++ b/ported/Source/HoudiniEngine/Private/HoudiniLandscapeSplineTranslator.cpp
+@@ -334,7 +334,7 @@ FHoudiniLandscapeSplineTranslator::AddSegmentToOutputObject(
+ 	}
+ 
+ 	// Now that we have the final cooked / temp edit layer name, find or create the Layer Output object for this layer
+-	TMap<FName, TObjectPtr<UHoudiniLandscapeSplineTargetLayerOutput>>& LayerOutputs = InOutputObject.GetLayerOutputs();
++	TMap<FName, UHoudiniLandscapeSplineTargetLayerOutput*>& LayerOutputs = InOutputObject.GetLayerOutputs();
+ 	UHoudiniLandscapeSplineTargetLayerOutput* LayerOutput = nullptr;
+ 	if (!LayerOutputs.Contains(EditLayerName))
+ 	{
+diff --git a/upstream/Source/HoudiniEngine/Private/UnrealDataTableTranslator.cpp b/ported/Source/HoudiniEngine/Private/UnrealDataTableTranslator.cpp
+index bf75df6..97856c2 100644
+--- a/upstream/Source/HoudiniEngine/Private/UnrealDataTableTranslator.cpp
++++ b/ported/Source/HoudiniEngine/Private/UnrealDataTableTranslator.cpp
+@@ -27,6 +27,9 @@
+ #include "UnrealDataTableTranslator.h"
+ 
+ #include "UObject/TextProperty.h"
++#include "UObject/UObjectIterator.h"
++#include "Engine/StaticMesh.h"
++#include "Engine/StaticMeshSocket.h"
+ 
+ #include "HoudiniEngine.h"
+ #include "HoudiniEngineAttributes.h"
+@@ -808,6 +811,213 @@ bool FUnrealDataTableTranslator::CreateInputNodeForDataTable(
+ 		}
+ 	}
+ 
++	// ---------------------------------------------------------------------
++	// props MVP: export StaticMesh sockets of the first mesh-typed column
++	// as point attributes so Houdini can place props on sockets.
++	// Attributes (name / storage / tupleSize):
++	//   unreal_socket_count                int    1
++	//   unreal_socket_<i>_name             string 1
++	//   unreal_socket_<i>_pos              float  3   (cm, mesh local space)
++	//   unreal_socket_<i>_rot              float  3   (deg: pitch, yaw, roll)
++	// Plates without sockets simply get unreal_socket_count = 0.
++	// ---------------------------------------------------------------------
++	{
++		FProperty* MeshColumnProp = nullptr;
++		for (TFieldIterator<FProperty> ItProp(ScriptStruct); ItProp; ++ItProp)
++		{
++			FProperty* Prop = *ItProp;
++			UClass* PropClass = nullptr;
++			if (const FSoftObjectProperty* SoftProp = CastField<FSoftObjectProperty>(Prop))
++			{
++				PropClass = SoftProp->PropertyClass;
++			}
++			else if (const FObjectProperty* ObjProp = CastField<FObjectProperty>(Prop))
++			{
++				PropClass = ObjProp->PropertyClass;
++			}
++			if (PropClass && PropClass->IsChildOf(UStaticMesh::StaticClass()))
++			{
++				MeshColumnProp = Prop;
++				break;
++			}
++		}
++
++		if (MeshColumnProp)
++		{
++			const TMap<FName, uint8*>& RowMap = DataTable->GetRowMap();
++			TArray<UStaticMesh*> RowMeshes;
++			RowMeshes.Init(nullptr, NumRows);
++
++			for (int32 RowIdx = 0; RowIdx < NumRows; ++RowIdx)
++			{
++				uint8* const* RowMemoryPtr = RowMap.Find(RowNames[RowIdx]);
++				if (!RowMemoryPtr || !*RowMemoryPtr)
++				{
++					HOUDINI_LOG_MESSAGE(
++						TEXT("[props MVP] row '%s': row memory not found."), *RowNames[RowIdx].ToString());
++					continue;
++				}
++				uint8* RowMemory = *RowMemoryPtr;
++				if (const FSoftObjectProperty* SoftProp = CastField<FSoftObjectProperty>(MeshColumnProp))
++				{
++					const FSoftObjectPtr& SoftObject = SoftProp->GetPropertyValue(RowMemory);
++					RowMeshes[RowIdx] = Cast<UStaticMesh>(SoftObject.LoadSynchronous());
++				}
++				else if (const FObjectProperty* ObjProp = CastField<FObjectProperty>(MeshColumnProp))
++				{
++					RowMeshes[RowIdx] = Cast<UStaticMesh>(ObjProp->GetObjectPropertyValue(RowMemory));
++				}
++
++				if (!RowMeshes[RowIdx])
++				{
++					// Fallback: resolve by the same string the plugin otherwise exports.
++					const FString MeshPath = DataTableUtils::GetPropertyValueAsString(
++						MeshColumnProp, RowMemory, EDataTableExportFlags());
++					if (!MeshPath.IsEmpty())
++					{
++						RowMeshes[RowIdx] = Cast<UStaticMesh>(StaticLoadObject(
++							UStaticMesh::StaticClass(), nullptr, *MeshPath));
++					}
++					HOUDINI_LOG_MESSAGE(
++						TEXT("[props MVP] row '%s': soft/path load failed, path = '%s', resolved = %s"),
++						*RowNames[RowIdx].ToString(), *MeshPath,
++						RowMeshes[RowIdx] ? TEXT("yes") : TEXT("no"));
++				}
++			}
++
++			TArray<TArray<UStaticMeshSocket*>> RowSockets;
++			RowSockets.SetNum(NumRows);
++			int32 MaxSocketCount = 0;
++			for (int32 RowIdx = 0; RowIdx < NumRows; ++RowIdx)
++			{
++				if (RowMeshes[RowIdx])
++				{
++					TArray<UStaticMeshSocket*> Sockets;
++					for (const TObjectPtr<UStaticMeshSocket>& SocketPtr : RowMeshes[RowIdx]->Sockets)
++					{
++						if (UStaticMeshSocket* Socket = SocketPtr.Get())
++						{
++							Sockets.AddUnique(Socket);
++						}
++					}
++					// Fallback: some editor builds keep sockets outside the mesh array.
++					if (Sockets.Num() == 0)
++					{
++						for (TObjectIterator<UStaticMeshSocket> SocketIt; SocketIt; ++SocketIt)
++						{
++							UStaticMeshSocket* Socket = *SocketIt;
++							if (Socket && Socket->GetTypedOuter<UStaticMesh>() == RowMeshes[RowIdx])
++							{
++								Sockets.AddUnique(Socket);
++							}
++						}
++					}
++					RowSockets[RowIdx] = Sockets;
++					MaxSocketCount = FMath::Max(MaxSocketCount, Sockets.Num());
++					HOUDINI_LOG_MESSAGE(
++						TEXT("[props MVP] row '%s': mesh '%s', sockets = %d"),
++						*RowNames[RowIdx].ToString(), *RowMeshes[RowIdx]->GetName(), Sockets.Num());
++				}
++				else
++				{
++					HOUDINI_LOG_MESSAGE(
++						TEXT("[props MVP] row '%s': mesh could not be loaded."), *RowNames[RowIdx].ToString());
++				}
++			}
++
++			HOUDINI_LOG_MESSAGE(
++				TEXT("[props MVP] DataTable '%s': exported sockets, max per row = %d (mesh column '%s')."),
++				*DataTable->GetName(), MaxSocketCount, *MeshColumnProp->GetName());
++
++			HAPI_AttributeInfo SocketAttributeInfo;
++			FHoudiniApi::AttributeInfo_Init(&SocketAttributeInfo);
++			SocketAttributeInfo.count = NumRows;
++			SocketAttributeInfo.owner = HAPI_ATTROWNER_POINT;
++			SocketAttributeInfo.originalOwner = HAPI_ATTROWNER_INVALID;
++			SocketAttributeInfo.exists = true;
++
++			{
++				SocketAttributeInfo.tupleSize = 1;
++				SocketAttributeInfo.storage = HAPI_STORAGETYPE_INT;
++				HOUDINI_CHECK_ERROR_RETURN(FHoudiniApi::AddAttribute(
++					FHoudiniEngine::Get().GetSession(), InputNodeId, 0,
++					"unreal_socket_count", &SocketAttributeInfo), false);
++
++				TArray<int32> SocketCounts;
++				SocketCounts.SetNum(NumRows);
++				for (int32 RowIdx = 0; RowIdx < NumRows; ++RowIdx)
++				{
++					SocketCounts[RowIdx] = RowSockets[RowIdx].Num();
++				}
++				FHoudiniHapiAccessor Accessor(InputNodeId, 0, "unreal_socket_count");
++				HOUDINI_CHECK_RETURN(Accessor.SetAttributeData(SocketAttributeInfo, SocketCounts), false);
++			}
++
++			for (int32 SocketIdx = 0; SocketIdx < MaxSocketCount; ++SocketIdx)
++			{
++				const FString NameAttribute = FString::Printf(TEXT("unreal_socket_%d_name"), SocketIdx);
++				const FString PositionAttribute = FString::Printf(TEXT("unreal_socket_%d_pos"), SocketIdx);
++				const FString RotationAttribute = FString::Printf(TEXT("unreal_socket_%d_rot"), SocketIdx);
++
++				TArray<FString> SocketNames;
++				TArray<float> SocketPositions;
++				TArray<float> SocketRotations;
++				SocketNames.Reserve(NumRows);
++				SocketPositions.SetNum(NumRows * 3);
++				SocketRotations.SetNum(NumRows * 3);
++
++				for (int32 RowIdx = 0; RowIdx < NumRows; ++RowIdx)
++				{
++					const TArray<UStaticMeshSocket*>& Sockets = RowSockets[RowIdx];
++					if (Sockets.IsValidIndex(SocketIdx) && IsValid(Sockets[SocketIdx]))
++					{
++						const UStaticMeshSocket* Socket = Sockets[SocketIdx];
++						SocketNames.Add(Socket->SocketName.ToString());
++						SocketPositions[RowIdx * 3 + 0] = (float)Socket->RelativeLocation.X;
++						SocketPositions[RowIdx * 3 + 1] = (float)Socket->RelativeLocation.Y;
++						SocketPositions[RowIdx * 3 + 2] = (float)Socket->RelativeLocation.Z;
++						SocketRotations[RowIdx * 3 + 0] = (float)Socket->RelativeRotation.Pitch;
++						SocketRotations[RowIdx * 3 + 1] = (float)Socket->RelativeRotation.Yaw;
++						SocketRotations[RowIdx * 3 + 2] = (float)Socket->RelativeRotation.Roll;
++					}
++					else
++					{
++						SocketNames.Add(FString());
++						SocketPositions[RowIdx * 3 + 0] = 0.0f;
++						SocketPositions[RowIdx * 3 + 1] = 0.0f;
++						SocketPositions[RowIdx * 3 + 2] = 0.0f;
++						SocketRotations[RowIdx * 3 + 0] = 0.0f;
++						SocketRotations[RowIdx * 3 + 1] = 0.0f;
++						SocketRotations[RowIdx * 3 + 2] = 0.0f;
++					}
++				}
++
++				SocketAttributeInfo.tupleSize = 1;
++				SocketAttributeInfo.storage = HAPI_STORAGETYPE_STRING;
++				HOUDINI_CHECK_ERROR_RETURN(FHoudiniApi::AddAttribute(
++					FHoudiniEngine::Get().GetSession(), InputNodeId, 0,
++					TCHAR_TO_ANSI(*NameAttribute), &SocketAttributeInfo), false);
++				FHoudiniHapiAccessor NameAccessor(InputNodeId, 0, TCHAR_TO_ANSI(*NameAttribute));
++				HOUDINI_CHECK_RETURN(NameAccessor.SetAttributeData(SocketAttributeInfo, SocketNames), false);
++
++				SocketAttributeInfo.tupleSize = 3;
++				SocketAttributeInfo.storage = HAPI_STORAGETYPE_FLOAT;
++
++				HOUDINI_CHECK_ERROR_RETURN(FHoudiniApi::AddAttribute(
++					FHoudiniEngine::Get().GetSession(), InputNodeId, 0,
++					TCHAR_TO_ANSI(*PositionAttribute), &SocketAttributeInfo), false);
++				FHoudiniHapiAccessor PositionAccessor(InputNodeId, 0, TCHAR_TO_ANSI(*PositionAttribute));
++				HOUDINI_CHECK_RETURN(PositionAccessor.SetAttributeData(SocketAttributeInfo, SocketPositions), false);
++
++				HOUDINI_CHECK_ERROR_RETURN(FHoudiniApi::AddAttribute(
++					FHoudiniEngine::Get().GetSession(), InputNodeId, 0,
++					TCHAR_TO_ANSI(*RotationAttribute), &SocketAttributeInfo), false);
++				FHoudiniHapiAccessor RotationAccessor(InputNodeId, 0, TCHAR_TO_ANSI(*RotationAttribute));
++				HOUDINI_CHECK_RETURN(RotationAccessor.SetAttributeData(SocketAttributeInfo, SocketRotations), false);
++			}
++		}
++	}
++
+ 	HOUDINI_CHECK_ERROR_RETURN(FHoudiniEngineUtils::HapiCommitGeo(InputNodeId), false);
+ 	if (!FHoudiniEngineUtils::HapiCookNode(InputNodeId, nullptr, true))
+ 		return false;
+diff --git a/upstream/Source/HoudiniEngine/Private/UnrealLandscapeTranslator.cpp b/ported/Source/HoudiniEngine/Private/UnrealLandscapeTranslator.cpp
+index f60f144..acb132c 100644
+--- a/upstream/Source/HoudiniEngine/Private/UnrealLandscapeTranslator.cpp
++++ b/ported/Source/HoudiniEngine/Private/UnrealLandscapeTranslator.cpp
+@@ -1,4 +1,4 @@
+-/*
++﻿/*
+ * Copyright (c) <2021> Side Effects Software Inc.
+ * All rights reserved.
+ *
+@@ -43,6 +43,9 @@
+ #include "LandscapeStreamingProxy.h"
+ #include "LandscapeDataAccess.h"
+ #include "LandscapeEdit.h"
++#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6
++#include "LandscapeEditLayer.h"
++#endif
+ #include "LightMap.h"
+ #include "Engine/MapBuildDataRegistry.h"
+ #include "PhysicalMaterials/PhysicalMaterial.h"
+@@ -384,7 +387,7 @@ FUnrealLandscapeTranslator::CreateHeightfieldFromLandscape(
+ 	//--------------------------------------------------------------------------------------------------
+ 
+ 	if (!SendTargetLayersToHoudini(LandscapeProxy, HeightFieldId, PartId, MergeId, MaskId, Options, HeightfieldVolumeInfo, XSize, YSize, MergeInputIndex))
+-	return false;
++		return false;
+ 
+ 	//--------------------------------------------------------------------------------------------------
+ 	// Create height field input for each editable landscape layer
+@@ -396,10 +399,20 @@ FUnrealLandscapeTranslator::CreateHeightfieldFromLandscape(
+ 	{
+ 		HAPI_VolumeInfo LayerVolumeInfo;
+ 		FHoudiniApi::VolumeInfo_Init(&HeightfieldVolumeInfo);
+-		
++#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6
++		for (const FLandscapeLayer& Layer : Landscape->GetLayersConst())
++#elif ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
++		for (const FLandscapeLayer& Layer : Landscape->GetLayers())
++#else
+ 		for(FLandscapeLayer& Layer : Landscape->LandscapeLayers)
++#endif
+ 		{
+-			const FString LayerVolumeName = FString::Format(TEXT("landscapelayer_{0}"), {Layer.Name.ToString()});
++#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6
++			FString LayerName = Layer.EditLayer->GetName().ToString();
++#else
++			FString LayerName = Layer.Name.ToString();
++#endif
++			const FString LayerVolumeName = FString::Format(TEXT("landscapelayer_{0}"), { LayerName });
+ 			
+ 			HAPI_NodeId LandscapeLayerNodeId = -1;
+ 			
+@@ -415,7 +428,7 @@ FUnrealLandscapeTranslator::CreateHeightfieldFromLandscape(
+ 				), false);
+ 
+ 			// Create a volume visualization node
+-			const FString VisualizationName = FString::Format(TEXT("visualization_{0}"), {Layer.Name.ToString()});
++			const FString VisualizationName = FString::Format(TEXT("visualization_{0}"), { LayerName });
+ 			HAPI_NodeId VisualizationNodeId = -1;
+ 			HOUDINI_CHECK_ERROR_RETURN(FHoudiniApi::CreateNode(
+ 				FHoudiniEngine::Get().GetSession(),
+@@ -450,7 +463,7 @@ FUnrealLandscapeTranslator::CreateHeightfieldFromLandscape(
+ 				), false);
+ 
+ 			// Create a visibility node
+-			const FString VisibilityName = FString::Format(TEXT("visibility_{0}"), {Layer.Name.ToString()});
++			const FString VisibilityName = FString::Format(TEXT("visibility_{0}"), {LayerName});
+ 			HAPI_NodeId VisibilityNodeId = -1;
+ 			HOUDINI_CHECK_ERROR_RETURN(FHoudiniApi::CreateNode(
+ 				FHoudiniEngine::Get().GetSession(),
+@@ -474,7 +487,12 @@ FUnrealLandscapeTranslator::CreateHeightfieldFromLandscape(
+ 			// Connect the visibility node to the merge input
+ 			HOUDINI_CHECK_ERROR_RETURN(MergeInputFn(MergeId, VisibilityNodeId), false);
+ 
+-			FScopedSetLandscapeEditingLayer Scope(Landscape, Layer.Guid ); // Scope landscape access to the current layer
++#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6
++			FGuid LayerGuid = Layer.EditLayer->GetGuid();
++#else
++			FGuid LayerGuid = Layer.Guid;
++#endif
++			FScopedSetLandscapeEditingLayer Scope(Landscape, LayerGuid ); // Scope landscape access to the current layer
+ 
+ 			//--------------------------------------------------------------------------------------------------
+ 			// Extracting height data
+@@ -928,25 +946,31 @@ FUnrealLandscapeTranslator::CreateInputNodeForLandscapeObject(
+ 		Options.bExportPaintLayersPerEditLayer = InInput->IsPaintLayerPerEditLayerExportEnabled();
+ 
+ 		int32 NumComponents = InLandscape->LandscapeComponents.Num();
+-		if (!bExportSelectionOnly || (SelectedComponents.Num() == NumComponents))
++		if(!bExportSelectionOnly || (SelectedComponents.Num() == NumComponents))
++		{
+ 			// Export the whole landscape and its layer as a single heightfield node
+ 			bSuccess = FUnrealLandscapeTranslator::CreateHeightfieldFromLandscape(
+ 				InLandscape,
+ 				Options,
+-				InputNodeId, 
+-				FinalInputNodeName, 
++				InputNodeId,
++				FinalInputNodeName,
+ 				ParentNodeId,
+ 				bSetObjectTransformToWorldTransform);
++		}
+ 		else
++		{
++			TSet<ULandscapeComponent*> SelectedLandscapeComponents = SelectedComponents;
++
+ 			// Each selected landscape component will be exported as separate volumes in a single heightfield
+ 			bSuccess = FUnrealLandscapeTranslator::CreateHeightfieldFromLandscapeComponentArray(
+-				InLandscape, 
+-				SelectedComponents, 
++				InLandscape,
++				SelectedLandscapeComponents,
+ 				Options,
+-				InputNodeId, 
+-				FinalInputNodeName, 
++				InputNodeId,
++				FinalInputNodeName,
+ 				ParentNodeId,
+ 				bSetObjectTransformToWorldTransform);
++		}
+ 	}
+ 	else
+ 	{
+@@ -2445,8 +2469,18 @@ bool FUnrealLandscapeTranslator::SendTargetLayersToHoudini(
+ 
+ 	bool bSuccess = true;
+ 
++	// Send target layers to Houdini. Note, we always need to create and commit a Mask or the Volume Info won't function
++	// correctly.
+ 	if (Options.bExportMergedPaintLayers)
++	{
+ 		bSuccess &= SendCombinedTargetLayersToHoudini(LandscapeProxy, HeightFieldId, PartId, MergeId, MaskId, HeightFieldVolumeInfo, XSize, YSize, OutMergeInputIndex);
++	}
++	else
++	{
++		InitDefaultHeightfieldMask(HeightFieldVolumeInfo, MaskId);
++		ApplyAttributesToHeightfieldNode(MaskId, PartId, LandscapeProxy);
++		HOUDINI_CHECK_ERROR_RETURN(FHoudiniEngineUtils::HapiCommitGeo(MaskId), false);
++	}
+ 
+ 	if (Options.bExportPaintLayersPerEditLayer)
+ 		bSuccess &= SendAllEditLayerTargetLayersToHoudini(LandscapeProxy, HeightFieldId, PartId, MergeId, MaskId, HeightFieldVolumeInfo, XSize, YSize, OutMergeInputIndex);
+@@ -2554,12 +2588,22 @@ bool FUnrealLandscapeTranslator::SendAllEditLayerTargetLayersToHoudini(
+ 		return false;
+ 
+ 	ALandscape * Landscape = LandscapeProxy->GetLandscapeActor();
+-	for(int EditLayerIndex = 0; EditLayerIndex < Landscape->GetLayerCount(); EditLayerIndex++)
++#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6
++	for(int EditLayerIndex = 0; EditLayerIndex < Landscape->GetLayersConst().Num(); EditLayerIndex++)
++#else
++	for (int EditLayerIndex = 0; EditLayerIndex < Landscape->GetLayerCount(); EditLayerIndex++)
++#endif
+ 	{
+ 		int32 NumTargetLayers = LandscapeInfo->Layers.Num();
+ 		for (int32 TargetLayerIndex = 0; TargetLayerIndex < NumTargetLayers; TargetLayerIndex++)
+ 		{
++#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6
++			const FName& EditLayerName = LandscapeProxy->GetLandscapeActor()->GetLayerConst(EditLayerIndex)->EditLayer->GetName();
++#elif ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
++			const FName & EditLayerName = LandscapeProxy->GetLandscapeActor()->GetLayerConst(EditLayerIndex)->Name;
++#else
+ 			const FName & EditLayerName = LandscapeProxy->GetLandscapeActor()->GetLayer(EditLayerIndex)->Name;
++#endif
+ 			const FName & TargetLayerName = LandscapeInfo->Layers[TargetLayerIndex].GetLayerName();
+ 
+ 			FHoudiniExtents Extents = FHoudiniLandscapeUtils::GetLandscapeExtents(LandscapeProxy);
+@@ -2599,3 +2643,4 @@ bool FUnrealLandscapeTranslator::SendAllEditLayerTargetLayersToHoudini(
+ 	return true;
+ }
+ 
++
+diff --git a/upstream/Source/HoudiniEngine/Private/UnrealLevelInstanceTranslator.cpp b/ported/Source/HoudiniEngine/Private/UnrealLevelInstanceTranslator.cpp
+index b051bc8..c15512e 100644
+--- a/upstream/Source/HoudiniEngine/Private/UnrealLevelInstanceTranslator.cpp
++++ b/ported/Source/HoudiniEngine/Private/UnrealLevelInstanceTranslator.cpp
+@@ -214,7 +214,6 @@ void FUnrealLevelInstanceTranslator::CreateAttributeData(HAPI_NodeId NodeId, ALe
+ 	const FTransform& Transform = LevelInstance->GetActorTransform();
+ 
+ 	FVector PositionVector = Transform.GetLocation();
+-	FVector3f Position;
+ 	Positions.Add(0.0f);
+ 	Positions.Add(0.0f);
+ 	Positions.Add(0.0f);
+diff --git a/upstream/Source/HoudiniEngine/Private/UnrealSkeletalMeshTranslator.cpp b/ported/Source/HoudiniEngine/Private/UnrealSkeletalMeshTranslator.cpp
+index 0241c04..624f6c1 100644
+--- a/upstream/Source/HoudiniEngine/Private/UnrealSkeletalMeshTranslator.cpp
++++ b/ported/Source/HoudiniEngine/Private/UnrealSkeletalMeshTranslator.cpp
+@@ -42,6 +42,8 @@
+ #include "Engine/SkeletalMesh.h"
+ #include "Engine/SkeletalMeshSocket.h"
+ #include "PhysicsEngine/PhysicsAsset.h"
++#include "PhysicsEngine/SkeletalBodySetup.h"
++#include "PhysicsEngine/AggregateGeom.h"
+ #include "PhysicalMaterials/PhysicalMaterial.h"
+ #include "SkeletalMeshAttributes.h"
+ #include "Rendering/SkeletalMeshModel.h"
+diff --git a/upstream/Source/HoudiniEngineEditor/Private/HoudiniBakeLandscape.cpp b/ported/Source/HoudiniEngineEditor/Private/HoudiniBakeLandscape.cpp
+index fb14ac7..f42eeb1 100644
+--- a/upstream/Source/HoudiniEngineEditor/Private/HoudiniBakeLandscape.cpp
++++ b/ported/Source/HoudiniEngineEditor/Private/HoudiniBakeLandscape.cpp
+@@ -63,6 +63,10 @@
+ #include "WorldPartition/WorldPartition.h"
+ #include "LandscapeSplineActor.h"
+ 
++#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
++	#include "LandscapeEditLayer.h"
++#endif
++
+ bool
+ FHoudiniLandscapeBake::BakeLandscapeLayer(
+ 	FHoudiniPackageParams& PackageParams, 
+@@ -89,7 +93,11 @@ FHoudiniLandscapeBake::BakeLandscapeLayer(
+ 	if (!LayerOutput.bCookedLayerRequiresBaking)
+ 		return true;
+ 
++#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
++	const FLandscapeLayer* BakedLayer = FHoudiniLandscapeUtils::GetOrCreateEditLayer(OutputLandscape, FName(LayerOutput.BakedEditLayer));
++#else
+ 	FLandscapeLayer* BakedLayer = FHoudiniLandscapeUtils::GetOrCreateEditLayer(OutputLandscape, FName(LayerOutput.BakedEditLayer));
++#endif
+ 	ULandscapeLayerInfoObject* TargetLayerInfo = OutputLandscape->GetLandscapeInfo()->GetLayerInfoByName(FName(LayerOutput.TargetLayer));
+ 
+ 	bool bWasLocked = LayerOutput.bLockLayer;
+@@ -102,18 +110,24 @@ FHoudiniLandscapeBake::BakeLandscapeLayer(
+ 
+ 	bool bIsHeightFieldLayer = LayerOutput.TargetLayer == "height";
+ 
++#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6
++	FGuid BakedLayerGuid = BakedLayer->EditLayer->GetGuid();
++#else
++	FGuid BakedLayerGuid = BakedLayer->Guid;
++#endif
++
+ 	if (OutputLandscape->bHasLayersContent && LayerOutput.bClearLayer && 
+ 		!ClearedLayers.Contains(LayerOutput.BakedEditLayer, LayerOutput.TargetLayer))
+ 	{
+ 		ClearedLayers.Add(LayerOutput.BakedEditLayer, LayerOutput.TargetLayer);
+ 		if (bIsHeightFieldLayer)
+ 		{
+-			OutputLandscape->ClearLayer(BakedLayer->Guid, nullptr, ELandscapeClearMode::Clear_Heightmap);
++			OutputLandscape->ClearLayer(BakedLayerGuid, nullptr, ELandscapeClearMode::Clear_Heightmap);
+ 		}
+ 		else
+ 		{
+ 			HOUDINI_CHECK_RETURN(TargetLayerInfo, false);
+-			OutputLandscape->ClearPaintLayer(BakedLayer->Guid, TargetLayerInfo);
++			OutputLandscape->ClearPaintLayer(BakedLayerGuid, TargetLayerInfo);
+ 		}
+ 
+ 	}
+@@ -126,7 +140,7 @@ FHoudiniLandscapeBake::BakeLandscapeLayer(
+ 	{
+ 		HOUDINI_CHECK_RETURN(TargetLayerInfo, false);
+ 
+-		FScopedSetLandscapeEditingLayer Scope(OutputLandscape, BakedLayer->Guid, [&] { OutputLandscape->RequestLayersContentUpdate(ELandscapeLayerUpdateMode::Update_All); });
++		FScopedSetLandscapeEditingLayer Scope(OutputLandscape, BakedLayerGuid, [&] { OutputLandscape->RequestLayersContentUpdate(ELandscapeLayerUpdateMode::Update_All); });
+ 
+ 		TArray<uint8_t> Values = FHoudiniLandscapeUtils::GetLayerData(OutputLandscape, Extents, FName(LayerOutput.CookedEditLayer), FName(LayerOutput.TargetLayer));
+ 
+@@ -151,11 +165,15 @@ FHoudiniLandscapeBake::BakeLandscapeLayer(
+ 	}
+ 	else
+ 	{
++#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
++		const FLandscapeLayer* EditLayer = FHoudiniLandscapeUtils::GetEditLayer(OutputLandscape, FName(LayerOutput.CookedEditLayer));
++#else
+ 		FLandscapeLayer* EditLayer = FHoudiniLandscapeUtils::GetEditLayer(OutputLandscape, FName(LayerOutput.CookedEditLayer));
++#endif
+ 		HOUDINI_CHECK_RETURN(EditLayer != nullptr, false);
+ 		TArray<uint16_t> Values = FHoudiniLandscapeUtils::GetHeightData(OutputLandscape, Extents, EditLayer);
+ 
+-		FScopedSetLandscapeEditingLayer Scope(OutputLandscape, BakedLayer->Guid, [&] { OutputLandscape->RequestLayersContentUpdate(ELandscapeLayerUpdateMode::Update_All); });
++		FScopedSetLandscapeEditingLayer Scope(OutputLandscape, BakedLayerGuid, [&] { OutputLandscape->RequestLayersContentUpdate(ELandscapeLayerUpdateMode::Update_All); });
+ 
+ 		FLandscapeEditDataInterface LandscapeEdit(TargetLandscapeInfo);
+ 		FHeightmapAccessor<false> HeightmapAccessor(TargetLandscapeInfo);
+@@ -163,17 +181,27 @@ FHoudiniLandscapeBake::BakeLandscapeLayer(
+ 
+ 	}
+ 
++	int EditLayerIndex = OutputLandscape->GetLayerIndex(FName(LayerOutput.BakedEditLayer));
+ 
+-	if (bWasLocked  && BakedLayer)
++	if (bWasLocked && BakedLayer)
++	{
++#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6
++		BakedLayer->EditLayer->SetLocked(false, true);
++#elif ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
++		OutputLandscape->SetLayerLocked(EditLayerIndex, true);
++#else
+ 		BakedLayer->bLocked = true;
+-
++#endif
++	}
+ 	//---------------------------------------------------------------------------------------------------------------------------
+ 	// Make sure baked layer is visible.
+ 	//---------------------------------------------------------------------------------------------------------------------------
+-
+-	int EditLayerIndex = OutputLandscape->GetLayerIndex(FName(LayerOutput.BakedEditLayer));
+ 	if (EditLayerIndex != INDEX_NONE)
++#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6
++		OutputLandscape->GetEditLayer(EditLayerIndex)->SetVisible(true, true);
++#else
+ 		OutputLandscape->SetLayerVisibility(EditLayerIndex, true);
++#endif
+ 
+ 	return true;
+ }
+@@ -440,6 +468,7 @@ FHoudiniLandscapeBake::MoveCookedToBakedLandscapes(
+ 						PackageParams);
+ 
+ 				Results.Add(BakeActor);
++				BakedOutputObject.Landscape = *BakeActor.Actor->GetPathName();	
+ 				
+ 			}
+ 
+@@ -610,7 +639,14 @@ FHoudiniLandscapeBake::BakeLandscapeSplinesLayer(
+ 	const FName BakedEditLayer = *LayerOutput.BakedEditLayer;
+ 
+ 	// If the landscape has a reserved splines layer, then we don't create any named temp/bake layers on the landscape for splines
++
++#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6
++	if (OutputLandscape->FindEditLayerOfType(ULandscapeEditLayerSplines::StaticClass()))
++#elif ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
++	if (OutputLandscape->FindLayerOfType(ULandscapeEditLayerSplines::StaticClass()))
++#else
+ 	if (OutputLandscape->GetLandscapeSplinesReservedLayer())
++#endif
+ 	{
+ 		FHoudiniLandscapeSplineApplyLayerData& LayerData = SegmentsToApplyToLayers.FindOrAdd({ OutputLandscape, BakedEditLayer });
+ 		LayerData.bIsReservedSplineLayer = true;
+@@ -628,7 +664,11 @@ FHoudiniLandscapeBake::BakeLandscapeSplinesLayer(
+ 		return true;
+ 
+ 	// Ensure that the baked layer exists
++#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
++	const FLandscapeLayer* const BakedLayer = FHoudiniLandscapeUtils::GetOrCreateEditLayer(OutputLandscape, BakedEditLayer);
++#else
+ 	FLandscapeLayer* const BakedLayer = FHoudiniLandscapeUtils::GetOrCreateEditLayer(OutputLandscape, BakedEditLayer);
++#endif
+ 
+ 	//---------------------------------------------------------------------------------------------------------------------------
+ 	// Clear the layer, but only once per bake.
+@@ -638,7 +678,11 @@ FHoudiniLandscapeBake::BakeLandscapeSplinesLayer(
+ 		!ClearedLayers.Contains(LayerOutput.BakedEditLayer, LayerOutput.TargetLayer))
+ 	{
+ 		ClearedLayers.Add(LayerOutput.BakedEditLayer, LayerOutput.TargetLayer);
++#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6
++		OutputLandscape->ClearLayer(BakedLayer->EditLayer->GetGuid(), nullptr, ELandscapeClearMode::Clear_Heightmap);
++#else
+ 		OutputLandscape->ClearLayer(BakedLayer->Guid, nullptr, ELandscapeClearMode::Clear_Heightmap);
++#endif
+ 	}
+ 
+ 	//---------------------------------------------------------------------------------------------------------------------------
+@@ -658,7 +702,13 @@ FHoudiniLandscapeBake::BakeLandscapeSplinesLayer(
+ 	//---------------------------------------------------------------------------------------------------------------------------
+ 	int EditLayerIndex = OutputLandscape->GetLayerIndex(BakedEditLayer);
+ 	if (EditLayerIndex != INDEX_NONE)
++	{
++#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6
++		OutputLandscape->GetEditLayer(EditLayerIndex)->SetVisible(true, true);
++#else	
+ 		OutputLandscape->SetLayerVisibility(EditLayerIndex, true);
++#endif
++	}
+ 
+ 	return true;
+ }
+diff --git a/upstream/Source/HoudiniEngineEditor/Private/HoudiniToolsEditor.cpp b/ported/Source/HoudiniEngineEditor/Private/HoudiniToolsEditor.cpp
+index 73f59c1..e0e7eed 100644
+--- a/upstream/Source/HoudiniEngineEditor/Private/HoudiniToolsEditor.cpp
++++ b/ported/Source/HoudiniEngineEditor/Private/HoudiniToolsEditor.cpp
+@@ -1965,7 +1965,7 @@ FHoudiniToolsEditor::CreateUniqueAssetIconBrush(TSharedPtr<FHoudiniTool> Houdini
+ 		if (CachedTextures.Contains(RawDataMD5))
+ 		{
+ 			// Reuse the previously cached texture
+-			IconTexture = CachedTextures.FindChecked(RawDataMD5);
++			IconTexture = CachedTextures.FindChecked(RawDataMD5).Get();
+ 		}
+ 
+ 		if (!IsValid(IconTexture))
+@@ -3714,8 +3714,10 @@ FHoudiniToolsEditor::Shutdown()
+ 	Categories.Empty();
+ 	for  (auto& Entry : CachedTextures)
+ 	{
+-		UTexture2D* CachedTexture = Entry.Value;
+-		if (IsValid(CachedTexture))
++		// CachedTextures now stores weak references: by the time modules shut down the
++		// texture objects may already be gone from the UObject array.
++		UTexture2D* CachedTexture = Entry.Value.Get();
++		if (IsValid(CachedTexture) && CachedTexture->IsValidLowLevelFast())
+ 		{
+ 			CachedTexture->RemoveFromRoot();
+ 		}
+diff --git a/upstream/Source/HoudiniEngineEditor/Private/HoudiniToolsEditor.h b/ported/Source/HoudiniEngineEditor/Private/HoudiniToolsEditor.h
+index af6e5e7..0d90b98 100644
+--- a/upstream/Source/HoudiniEngineEditor/Private/HoudiniToolsEditor.h
++++ b/ported/Source/HoudiniEngineEditor/Private/HoudiniToolsEditor.h
+@@ -372,5 +372,8 @@ protected:
+ 	// Categories
+ 	TMap< FHoudiniToolCategory, TSharedPtr<FHoudiniToolList> > Categories;
+ 
+-	TMap<FString, UTexture2D*> CachedTextures;
++	// Keep weak references: editor shutdown can run after the textures have already been
++	// removed from the UObject array (asset/package unload), and a raw pointer there
++	// triggers "Assertion failed: Index >= 0" in RemoveFromRoot().
++	TMap<FString, TWeakObjectPtr<UTexture2D>> CachedTextures;
+ };
+diff --git a/upstream/Source/HoudiniEngineRuntime/Private/HoudiniEngineRuntime.cpp b/ported/Source/HoudiniEngineRuntime/Private/HoudiniEngineRuntime.cpp
+index b84148c..485bf66 100644
+--- a/upstream/Source/HoudiniEngineRuntime/Private/HoudiniEngineRuntime.cpp
++++ b/ported/Source/HoudiniEngineRuntime/Private/HoudiniEngineRuntime.cpp
+@@ -204,14 +204,34 @@ FHoudiniEngineRuntime::UnRegisterHoudiniComponent(UHoudiniAssetComponent* HAC)
+ 	if (!IsValid(HAC))
+ 		return;
+ 
+-	// Calling GetPathName here may lead to some crashes due to invalid outers...
+-	//HOUDINI_LOG_DISPLAY(TEXT("[FHoudiniEngineRuntime::UnRegisterHoudiniComponent] HAC: %s"), *(HAC->GetPathName()) );
++	// UE 5.6 port fix: bail out if the list is already empty (e.g. during editor shutdown).
++	if (RegisteredHoudiniComponents.IsEmpty())
++		return;
+ 
+ 	FScopeLock ScopeLock(&CriticalSection);
+ 
+-	int32 FoundIdx = RegisteredHoudiniComponents.Find(HAC);
++	// UE 5.6 port fix: do not use RegisteredHoudiniComponents.Find(HAC). Its comparison
++	// goes through TWeakObjectPtr, which can call GUObjectArray.IndexToObject(INDEX_NONE)
++	// and trip the "Assertion failed: Index >= 0" check during shutdown. Walk the array
++	// manually and compare raw pointers instead.
++	int32 FoundIdx = -1;
++	for (int32 nIdx = 0; nIdx < RegisteredHoudiniComponents.Num(); nIdx++)
++	{
++		const TWeakObjectPtr<UHoudiniAssetComponent> Ptr = RegisteredHoudiniComponents[nIdx];
++		if (!Ptr.IsValid(true, true))
++			continue;
++
++		UHoudiniAssetComponent* CurrentHAC = Ptr.GetEvenIfUnreachable();
++		if (CurrentHAC && CurrentHAC == HAC)
++		{
++			FoundIdx = nIdx;
++			break;
++		}
++	}
++
+ 	if (!RegisteredHoudiniComponents.IsValidIndex(FoundIdx))
+ 		return;
++
+ 	HAC->NotifyHoudiniPreUnregister();
+ 	UnRegisterHoudiniComponent(FoundIdx);
+ 	HAC->NotifyHoudiniPostUnregister();
+@@ -226,16 +246,19 @@ FHoudiniEngineRuntime::UnRegisterHoudiniComponent(const int32& ValidIndex)
+ 
+ 	FScopeLock ScopeLock(&CriticalSection);
+ 
+-	TWeakObjectPtr<UHoudiniAssetComponent> Ptr = RegisteredHoudiniComponents[ValidIndex];
+-	if (Ptr.IsValid(true, false))
++	if (!RegisteredHoudiniComponents.IsValidIndex(ValidIndex))
++		return;
++
++	const TWeakObjectPtr<UHoudiniAssetComponent> Ptr = RegisteredHoudiniComponents[ValidIndex];
++	if (Ptr.IsValid(true, true))
+ 	{
+-		UHoudiniAssetComponent* HAC = Ptr.Get();
+-		if (HAC && HAC->CanDeleteHoudiniNodes())
++		UHoudiniAssetComponent* HAC = Ptr.GetEvenIfUnreachable();
++		if (HAC && HAC->CanDeleteHoudiniNodes() && HAC->GetAssetId() >= 0)
+ 		{
+ 			MarkNodeIdAsPendingDelete(HAC->GetAssetId(), true);
+ 		}
+ 	}
+-	
++
+ 	RegisteredHoudiniComponents.RemoveAt(ValidIndex);
+ }
+ 

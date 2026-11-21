@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------------------
+# Build output — never commit
+# ---------------------------------------------------------------------------
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+Build/
+.vs/
+*.sln
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+
+# Debug symbols (large, machine-specific)
+*.pdb
+
+# Compiled objects / generated code
+*.obj
+*.o
+*.lib
+*.exp
+*.ilk
+*.generated.h
+*.uplugin.Template
+*.Template.cs
+
+# OS / editor noise
+Thumbs.db
+.DS_Store
+desktop.ini
+*.swp
+*~
