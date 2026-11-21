@@ -163,7 +163,7 @@ YourProject/
 > If your project has no `Plugins` folder, create it next to the `.uproject`.
 
 `Binaries/` and `Intermediate/` are **not** part of the repository — Unreal creates them during the
-first build (see [section 4.3](#43-first-launch--build-the-modules) and
+first build (see [section 4.3](#43-building-the-modules-on-first-launch) and
 [section 8](#8-building-from-source)).
 
 ### 4.2 Enable the plugin
@@ -184,7 +184,7 @@ If you want to be explicit, enable it in `YourProject.uproject`:
 or use **Edit → Plugins**, search for **Houdini Engine**, tick it and restart the editor when asked.
 The plugin loads in the editor; the `HoudiniEngineRuntime` module keeps runtime types available.
 
-### 4.3 First launch — build the modules
+### 4.3 Building the modules on first launch
 
 This repository contains the plugin **source only** (no `Binaries/`). The three modules compile to
 `Binaries/Win64/UnrealEditor-HoudiniEngine*.dll` when the project is first opened:
